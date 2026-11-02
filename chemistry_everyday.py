@@ -1,25 +1,17 @@
-#!/usr/bin/env python3
 """
-Chemistry Game Master - CBSE Class XI (NCERT)
+Chemistry Game Master - CBSE Class XI (NCERT)  |  Streamlit web version
 Game owned by: NilanjanC
 
-Requirements:
-    Python 3.12
-    pip install google-genai
-
-Setup:
-    export GEMINI_API_KEY="your-key-here"      (Linux / macOS)
-    setx GEMINI_API_KEY "your-key-here"        (Windows, then reopen terminal)
-
-Run:
-    python chem_game_master.py
+Python 3.12
+Secrets: add GEMINI_API_KEY in Streamlit Cloud -> App settings -> Secrets:
+    GEMINI_API_KEY = "your-key-here"
 """
 
 import json
 import os
 import random
-import sys
 
+import streamlit as st
 from google import genai
 from google.genai import types
 
@@ -27,24 +19,23 @@ OWNER = "NilanjanC"
 MODEL_NAME = "gemini-3.5-flash-lite"
 MAX_RETRIES = 3
 
-CHAPTERS = {
-    1: "Some Basic Concepts of Chemistry",
-    2: "Structure of Atom",
-    3: "Classification of Elements and Periodicity in Properties",
-    4: "Chemical Bonding and Molecular Structure",
-    5: "States of Matter",
-    6: "Thermodynamics",
-    7: "Equilibrium",
-    8: "Redox Reactions",
-    9: "Hydrogen",
-    10: "The s-Block Elements",
-    11: "The p-Block Elements",
-    12: "Organic Chemistry: Some Basic Principles and Techniques",
-    13: "Hydrocarbons",
-    14: "Environmental Chemistry",
-}
-
-DIFFICULTIES = {1: "Easy", 2: "Medium", 3: "Hard"}
+CHAPTERS = [
+    "Some Basic Concepts of Chemistry",
+    "Structure of Atom",
+    "Classification of Elements and Periodicity in Properties",
+    "Chemical Bonding and Molecular Structure",
+    "States of Matter",
+    "Thermodynamics",
+    "Equilibrium",
+    "Redox Reactions",
+    "Hydrogen",
+    "The s-Block Elements",
+    "The p-Block Elements",
+    "Organic Chemistry: Some Basic Principles and Techniques",
+    "Hydrocarbons",
+    "Environmental Chemistry",
+]
+RANDOM_CHOICE = "Surprise me (random chapter)"
 
 DIFFICULTY_NOTES = {
     "Easy": "Direct concept recall or a simple one-step application. Suitable for a beginner.",
@@ -105,52 +96,20 @@ RESPONSE_SCHEMA = {
 REQUIRED_FIELDS = ("story", "question", "options", "hint", "correct_option", "explanation")
 
 
-def banner() -> None:
-    line = "=" * 62
-    print(line)
-    print("   CHEMISTRY GAME MASTER  |  CBSE Class XI (NCERT)")
-    print(f"   Game owned by: {OWNER}")
-    print(line)
-
-
-def get_client() -> genai.Client:
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+# ----------------------------------------------------------------- Gemini ---
+@st.cache_resource
+def get_client():
+    api_key = None
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        print("\nError: GEMINI_API_KEY environment variable is not set.")
-        print("Get a key from Google AI Studio and set it, e.g.:")
-        print('    export GEMINI_API_KEY="your-key-here"')
-        sys.exit(1)
+        return None
     return genai.Client(api_key=api_key)
 
 
-def ask_choice(prompt: str, valid: set[str]) -> str:
-    while True:
-        value = input(prompt).strip().upper()
-        if value in valid:
-            return value
-        print(f"  Please enter one of: {', '.join(sorted(valid))}")
-
-
-def choose_chapter() -> int:
-    print("\nSelect a chapter:")
-    for num, name in CHAPTERS.items():
-        print(f"  {num:>2}. {name}")
-    print("   0. Surprise me (random chapter)")
-    valid = {str(n) for n in CHAPTERS} | {"0"}
-    choice = int(ask_choice("Chapter number: ", valid))
-    return random.choice(list(CHAPTERS)) if choice == 0 else choice
-
-
-def choose_difficulty() -> str:
-    print("\nSelect difficulty:")
-    for num, name in DIFFICULTIES.items():
-        print(f"  {num}. {name}")
-    choice = int(ask_choice("Difficulty: ", {str(n) for n in DIFFICULTIES}))
-    return DIFFICULTIES[choice]
-
-
-def validate(data: dict) -> dict:
-    """Raise ValueError if the model output does not match the required format."""
+def validate(data):
     if not isinstance(data, dict):
         raise ValueError("Response is not a JSON object")
     missing = [f for f in REQUIRED_FIELDS if f not in data]
@@ -165,11 +124,10 @@ def validate(data: dict) -> dict:
     return data
 
 
-def generate_question(client: genai.Client, chapter: str, difficulty: str,
-                      previous_questions: list[str]) -> dict:
+def generate_question(client, chapter, difficulty, previous):
     avoid = ""
-    if previous_questions:
-        recent = "\n".join(f"- {q}" for q in previous_questions[-10:])
+    if previous:
+        recent = "\n".join(f"- {q}" for q in previous[-10:])
         avoid = f"\nDo NOT repeat or closely resemble these earlier questions:\n{recent}\n"
 
     prompt = (
@@ -179,7 +137,6 @@ def generate_question(client: genai.Client, chapter: str, difficulty: str,
         f"{avoid}"
         "Generate one new MCQ now, in the required JSON format."
     )
-
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
         response_mime_type="application/json",
@@ -187,98 +144,139 @@ def generate_question(client: genai.Client, chapter: str, difficulty: str,
         temperature=1.0,
     )
 
-    last_error: Exception | None = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    last_error = None
+    for _ in range(MAX_RETRIES):
         try:
             response = client.models.generate_content(
                 model=MODEL_NAME, contents=prompt, config=config
             )
             return validate(json.loads(response.text))
-        except Exception as exc:  # network, JSON or validation problems
+        except Exception as exc:
             last_error = exc
-            print(f"  (attempt {attempt}/{MAX_RETRIES} failed: {exc})")
     raise RuntimeError(f"Could not generate a valid question: {last_error}")
 
 
-def play_round(question: dict) -> bool:
-    print("\n" + "-" * 62)
-    print("THE STORY")
-    print("-" * 62)
-    print(question["story"])
-    print("\nQUESTION")
-    print(question["question"])
-    print()
-    for letter in "ABCD":
-        print(f"  {letter}) {question['options'][letter]}")
-    print("\nType A, B, C or D to answer, or H for a hint.")
-
-    hint_used = False
-    while True:
-        answer = ask_choice("Your answer: ", {"A", "B", "C", "D", "H"})
-        if answer == "H":
-            if hint_used:
-                print(f"  Hint (again): {question['hint']}")
-            else:
-                print(f"  Hint: {question['hint']}")
-                hint_used = True
-            continue
-        break
-
-    correct = question["correct_option"]
-    is_right = answer == correct
-    print()
-    if is_right:
-        print("Correct! Well done.")
-    else:
-        print(f"Not quite. The correct answer is {correct}) {question['options'][correct]}")
-    print("\nEXPLANATION")
-    print(question["explanation"])
-    return is_right
+# ------------------------------------------------------------------- State ---
+def init_state():
+    defaults = {
+        "score": 0,
+        "played": 0,
+        "previous": [],
+        "question": None,
+        "chapter_used": None,
+        "difficulty_used": None,
+        "show_hint": False,
+        "submitted": False,
+        "chosen": None,
+        "quiz_key": 0,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
 
-def main() -> None:
-    banner()
-    client = get_client()
-
-    score = 0
-    played = 0
-    previous: list[str] = []
-
-    chapter_num = choose_chapter()
-    difficulty = choose_difficulty()
-
-    while True:
-        chapter_name = CHAPTERS[chapter_num]
-        print(f"\nChapter: {chapter_name} | Difficulty: {difficulty}")
-        print("Summoning your question...")
+def new_question(client, chapter_choice, difficulty):
+    chapter = random.choice(CHAPTERS) if chapter_choice == RANDOM_CHOICE else chapter_choice
+    with st.spinner("Summoning your question..."):
         try:
-            question = generate_question(client, chapter_name, difficulty, previous)
+            q = generate_question(client, chapter, difficulty, st.session_state.previous)
         except RuntimeError as exc:
-            print(f"\n{exc}")
-            break
-
-        previous.append(question["question"])
-        played += 1
-        if play_round(question):
-            score += 1
-        print(f"\nScore: {score}/{played}")
-
-        print("\nWhat next?  [N] Next question  [C] Change chapter/difficulty  [Q] Quit")
-        nxt = ask_choice("Choice: ", {"N", "C", "Q"})
-        if nxt == "Q":
-            break
-        if nxt == "C":
-            chapter_num = choose_chapter()
-            difficulty = choose_difficulty()
-
-    print("\n" + "=" * 62)
-    print(f"Final score: {score}/{played}")
-    print(f"Thanks for playing! Chemistry Game Master - owned by {OWNER}")
-    print("=" * 62)
+            st.error(str(exc))
+            return
+    st.session_state.question = q
+    st.session_state.chapter_used = chapter
+    st.session_state.difficulty_used = difficulty
+    st.session_state.previous.append(q["question"])
+    st.session_state.show_hint = False
+    st.session_state.submitted = False
+    st.session_state.chosen = None
+    st.session_state.quiz_key += 1
 
 
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\nGame ended. Chemistry Game Master - owned by {OWNER}")
+# --------------------------------------------------------------------- UI ---
+def main():
+    st.set_page_config(page_title="Chemistry Game Master", page_icon="🧪")
+    init_state()
+
+    st.title("🧪 Chemistry Game Master")
+    st.caption(f"CBSE Class XI (NCERT)  |  Game owned by {OWNER}")
+
+    client = get_client()
+    if client is None:
+        st.error(
+            "GEMINI_API_KEY is not set. In Streamlit Cloud open App settings -> Secrets "
+            'and add:  GEMINI_API_KEY = "your-key-here"'
+        )
+        st.stop()
+
+    with st.sidebar:
+        st.header("Game settings")
+        chapter_choice = st.selectbox("Chapter", [RANDOM_CHOICE] + CHAPTERS)
+        difficulty = st.radio("Difficulty", ["Easy", "Medium", "Hard"], horizontal=True)
+        st.metric("Score", f"{st.session_state.score} / {st.session_state.played}")
+        if st.button("Reset score"):
+            st.session_state.score = 0
+            st.session_state.played = 0
+            st.session_state.previous = []
+            st.session_state.question = None
+            st.rerun()
+        st.caption(f"© {OWNER}")
+
+    q = st.session_state.question
+
+    if q is None:
+        st.info("Choose a chapter and difficulty in the sidebar, then start.")
+        if st.button("Start game", type="primary"):
+            new_question(client, chapter_choice, difficulty)
+            st.rerun()
+        return
+
+    st.caption(
+        f"Chapter: {st.session_state.chapter_used}  |  "
+        f"Difficulty: {st.session_state.difficulty_used}"
+    )
+    st.subheader("The Story")
+    st.write(q["story"])
+    st.subheader("Question")
+    st.write(q["question"])
+
+    letters = ["A", "B", "C", "D"]
+    labels = [f"{l}) {q['options'][l]}" for l in letters]
+
+    choice = st.radio(
+        "Choose your answer",
+        labels,
+        index=None,
+        disabled=st.session_state.submitted,
+        key=f"choice_{st.session_state.quiz_key}",
+    )
+
+    if not st.session_state.submitted:
+        col1, col2 = st.columns(2)
+        if col1.button("💡 Show hint"):
+            st.session_state.show_hint = True
+        if st.session_state.show_hint:
+            st.info(f"Hint: {q['hint']}")
+        if col2.button("Submit answer", type="primary"):
+            if choice is None:
+                st.warning("Please pick an option first.")
+            else:
+                st.session_state.chosen = choice[0]
+                st.session_state.submitted = True
+                st.session_state.played += 1
+                if choice[0] == q["correct_option"]:
+                    st.session_state.score += 1
+                st.rerun()
+    else:
+        correct = q["correct_option"]
+        if st.session_state.chosen == correct:
+            st.success("Correct! Well done.")
+        else:
+            st.error(f"Not quite. The correct answer is {correct}) {q['options'][correct]}")
+        st.subheader("Explanation")
+        st.write(q["explanation"])
+        if st.button("Next question ➡️", type="primary"):
+            new_question(client, chapter_choice, difficulty)
+            st.rerun()
+
+
+main()
