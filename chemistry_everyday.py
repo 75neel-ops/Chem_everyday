@@ -1,5 +1,5 @@
 """
-Chemistry in Everyday Life - CBSE Class XI (NCERT)  |  Streamlit web version
+Chemistry Game Master - CBSE Class XI (NCERT)  |  Streamlit web version
 Game owned by: NilanjanC
 
 Python 3.12
