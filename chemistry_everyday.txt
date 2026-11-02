@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""
+Chemistry Game Master - CBSE Class XI (NCERT)
+Game owned by: NilanjanC
+
+Requirements:
+    Python 3.12
+    pip install google-genai
+
+Setup:
+    export GEMINI_API_KEY="your-key-here"      (Linux / macOS)
+    setx GEMINI_API_KEY "your-key-here"        (Windows, then reopen terminal)
+
+Run:
+    python chem_game_master.py
+"""
+
+import json
+import os
+import random
+import sys
+
+from google import genai
+from google.genai import types
+
+OWNER = "NilanjanC"
+MODEL_NAME = "gemini-3.5-flash-lite"
+MAX_RETRIES = 3
+
+CHAPTERS = {
+    1: "Some Basic Concepts of Chemistry",
+    2: "Structure of Atom",
+    3: "Classification of Elements and Periodicity in Properties",
+    4: "Chemical Bonding and Molecular Structure",
+    5: "States of Matter",
+    6: "Thermodynamics",
+    7: "Equilibrium",
+    8: "Redox Reactions",
+    9: "Hydrogen",
+    10: "The s-Block Elements",
+    11: "The p-Block Elements",
+    12: "Organic Chemistry: Some Basic Principles and Techniques",
+    13: "Hydrocarbons",
+    14: "Environmental Chemistry",
+}
+
+DIFFICULTIES = {1: "Easy", 2: "Medium", 3: "Hard"}
+
+DIFFICULTY_NOTES = {
+    "Easy": "Direct concept recall or a simple one-step application. Suitable for a beginner.",
+    "Medium": "Needs understanding of the concept plus a short calculation or two-step reasoning.",
+    "Hard": "Needs multi-step reasoning, careful numerical work, or linking two ideas. "
+            "Plausible distractors based on common student mistakes.",
+}
+
+SYSTEM_INSTRUCTION = f"""
+You are an interactive Chemistry Game Master for CBSE Class XI (NCERT syllabus).
+This game is owned by {OWNER}.
+
+Your task is to generate exactly ONE unique multiple-choice question (MCQ) for the
+chapter and difficulty level requested.
+
+Strict rules:
+1. Do NOT teach directly. Create a short, engaging daily-life story or real-world
+   scenario (rusted iron, fizzing soda, cooking, metabolism in the body, a kitchen,
+   a swimming pool, a fireworks show, etc. - whatever suits the concept) that connects
+   to a chemistry concept from the chosen chapter.
+2. Ask a question based on that scenario about the chemical change, formula, law,
+   calculation or concept involved.
+3. Provide exactly 4 options labelled A, B, C, D. Only one is correct.
+4. Do NOT reveal the answer inside the story, question or hint. The hint must only
+   nudge the student toward the right concept, never state the answer.
+5. Keep all content within the NCERT Class XI syllabus and scientifically accurate.
+6. Everything must be in English.
+7. Output strictly valid JSON with exactly these fields:
+   "story", "question", "options", "hint", "correct_option", "explanation".
+   - "options" is an object with keys "A", "B", "C", "D".
+   - "correct_option" is one letter: "A", "B", "C" or "D".
+   - "explanation" explains why the correct option is right (and briefly why
+     others are wrong). It is shown only after the student answers.
+"""
+
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "story": {"type": "string"},
+        "question": {"type": "string"},
+        "options": {
+            "type": "object",
+            "properties": {
+                "A": {"type": "string"},
+                "B": {"type": "string"},
+                "C": {"type": "string"},
+                "D": {"type": "string"},
+            },
+            "required": ["A", "B", "C", "D"],
+        },
+        "hint": {"type": "string"},
+        "correct_option": {"type": "string", "enum": ["A", "B", "C", "D"]},
+        "explanation": {"type": "string"},
+    },
+    "required": ["story", "question", "options", "hint", "correct_option", "explanation"],
+}
+
+REQUIRED_FIELDS = ("story", "question", "options", "hint", "correct_option", "explanation")
+
+
+def banner() -> None:
+    line = "=" * 62
+    print(line)
+    print("   CHEMISTRY GAME MASTER  |  CBSE Class XI (NCERT)")
+    print(f"   Game owned by: {OWNER}")
+    print(line)
+
+
+def get_client() -> genai.Client:
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        print("\nError: GEMINI_API_KEY environment variable is not set.")
+        print("Get a key from Google AI Studio and set it, e.g.:")
+        print('    export GEMINI_API_KEY="your-key-here"')
+        sys.exit(1)
+    return genai.Client(api_key=api_key)
+
+
+def ask_choice(prompt: str, valid: set[str]) -> str:
+    while True:
+        value = input(prompt).strip().upper()
+        if value in valid:
+            return value
+        print(f"  Please enter one of: {', '.join(sorted(valid))}")
+
+
+def choose_chapter() -> int:
+    print("\nSelect a chapter:")
+    for num, name in CHAPTERS.items():
+        print(f"  {num:>2}. {name}")
+    print("   0. Surprise me (random chapter)")
+    valid = {str(n) for n in CHAPTERS} | {"0"}
+    choice = int(ask_choice("Chapter number: ", valid))
+    return random.choice(list(CHAPTERS)) if choice == 0 else choice
+
+
+def choose_difficulty() -> str:
+    print("\nSelect difficulty:")
+    for num, name in DIFFICULTIES.items():
+        print(f"  {num}. {name}")
+    choice = int(ask_choice("Difficulty: ", {str(n) for n in DIFFICULTIES}))
+    return DIFFICULTIES[choice]
+
+
+def validate(data: dict) -> dict:
+    """Raise ValueError if the model output does not match the required format."""
+    if not isinstance(data, dict):
+        raise ValueError("Response is not a JSON object")
+    missing = [f for f in REQUIRED_FIELDS if f not in data]
+    if missing:
+        raise ValueError(f"Missing fields: {missing}")
+    opts = data["options"]
+    if not isinstance(opts, dict) or set(opts) != {"A", "B", "C", "D"}:
+        raise ValueError("options must have exactly keys A, B, C, D")
+    data["correct_option"] = str(data["correct_option"]).strip().upper()
+    if data["correct_option"] not in opts:
+        raise ValueError("correct_option must be A, B, C or D")
+    return data
+
+
+def generate_question(client: genai.Client, chapter: str, difficulty: str,
+                      previous_questions: list[str]) -> dict:
+    avoid = ""
+    if previous_questions:
+        recent = "\n".join(f"- {q}" for q in previous_questions[-10:])
+        avoid = f"\nDo NOT repeat or closely resemble these earlier questions:\n{recent}\n"
+
+    prompt = (
+        f"Chapter: {chapter}\n"
+        f"Difficulty level: {difficulty} - {DIFFICULTY_NOTES[difficulty]}\n"
+        f"Random seed for variety: {random.randint(1000, 999999)}\n"
+        f"{avoid}"
+        "Generate one new MCQ now, in the required JSON format."
+    )
+
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        response_mime_type="application/json",
+        response_schema=RESPONSE_SCHEMA,
+        temperature=1.0,
+    )
+
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME, contents=prompt, config=config
+            )
+            return validate(json.loads(response.text))
+        except Exception as exc:  # network, JSON or validation problems
+            last_error = exc
+            print(f"  (attempt {attempt}/{MAX_RETRIES} failed: {exc})")
+    raise RuntimeError(f"Could not generate a valid question: {last_error}")
+
+
+def play_round(question: dict) -> bool:
+    print("\n" + "-" * 62)
+    print("THE STORY")
+    print("-" * 62)
+    print(question["story"])
+    print("\nQUESTION")
+    print(question["question"])
+    print()
+    for letter in "ABCD":
+        print(f"  {letter}) {question['options'][letter]}")
+    print("\nType A, B, C or D to answer, or H for a hint.")
+
+    hint_used = False
+    while True:
+        answer = ask_choice("Your answer: ", {"A", "B", "C", "D", "H"})
+        if answer == "H":
+            if hint_used:
+                print(f"  Hint (again): {question['hint']}")
+            else:
+                print(f"  Hint: {question['hint']}")
+                hint_used = True
+            continue
+        break
+
+    correct = question["correct_option"]
+    is_right = answer == correct
+    print()
+    if is_right:
+        print("Correct! Well done.")
+    else:
+        print(f"Not quite. The correct answer is {correct}) {question['options'][correct]}")
+    print("\nEXPLANATION")
+    print(question["explanation"])
+    return is_right
+
+
+def main() -> None:
+    banner()
+    client = get_client()
+
+    score = 0
+    played = 0
+    previous: list[str] = []
+
+    chapter_num = choose_chapter()
+    difficulty = choose_difficulty()
+
+    while True:
+        chapter_name = CHAPTERS[chapter_num]
+        print(f"\nChapter: {chapter_name} | Difficulty: {difficulty}")
+        print("Summoning your question...")
+        try:
+            question = generate_question(client, chapter_name, difficulty, previous)
+        except RuntimeError as exc:
+            print(f"\n{exc}")
+            break
+
+        previous.append(question["question"])
+        played += 1
+        if play_round(question):
+            score += 1
+        print(f"\nScore: {score}/{played}")
+
+        print("\nWhat next?  [N] Next question  [C] Change chapter/difficulty  [Q] Quit")
+        nxt = ask_choice("Choice: ", {"N", "C", "Q"})
+        if nxt == "Q":
+            break
+        if nxt == "C":
+            chapter_num = choose_chapter()
+            difficulty = choose_difficulty()
+
+    print("\n" + "=" * 62)
+    print(f"Final score: {score}/{played}")
+    print(f"Thanks for playing! Chemistry Game Master - owned by {OWNER}")
+    print("=" * 62)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\nGame ended. Chemistry Game Master - owned by {OWNER}")
